@@ -1,0 +1,82 @@
+# ESP-IDF 构建输出
+build/
+sdkconfig.old
+*.pyc
+
+# IDE 和编辑器文件
+.vscode/
+.history/
+.lh/
+.devcontainer/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 编译和调试文件
+*.o
+*.obj
+*.elf
+*.bin
+*.map
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# clangd 语言服务器
+.clangd/
+.clang-format
+.clang-tidy
+compile_commands.json
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+.tmp/
+.temp/
+
+# Python 相关
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 操作系统生成的文件
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ESP-IDF 特定文件
+dependencies.lock
+managed_components/
+
+# 备份文件
+*.bak
+*.backup
+*~
+
+# 文档构建输出
+docs/_build/
+docs/doxygen-warning-log.txt
+docs/sphinx-warning-log.txt
+docs/sphinx-warning-log-sanitized.txt
+
+# ESP-IDF 组件管理器
+managed_components/
+dependencies.lock
+
+# Kconfig 备份
+sdkconfig.old
