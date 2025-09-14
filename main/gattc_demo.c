@@ -29,8 +29,14 @@
 #include "esp_bt_main.h"
 #include "esp_gatt_common_api.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "soc/gpio_reg.h"
+#include "soc/soc.h"
+#include "esp_system.h"
+#include "esp_intr_alloc.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "driver/gpio.h"
 
 #define GATTC_TAG "GATTC_DEMO"
 #define REMOTE_SERVICE_UUID        0x00FF
@@ -41,6 +47,17 @@
 
 // 自定义特征UUID
 #define CUSTOM_CHAR_UUID_0013      0x0013
+
+// GPIO按键配置
+#define GPIO_BUTTON_PIN            18
+#define GPIO_BUTTON_LEVEL          0
+#define ESP_INTR_FLAG_DEFAULT      0
+
+// GPIO中断相关寄存器
+#include "soc/gpio_struct.h"
+#include "hal/gpio_ll.h"
+#include "soc/io_mux_reg.h"
+#include "esp_intr_alloc.h"
 #if CONFIG_EXAMPLE_INIT_DEINIT_LOOP
 #define EXAMPLE_TEST_COUNT 50
 #endif
@@ -53,6 +70,10 @@ static esp_gattc_descr_elem_t *descr_elem_result = NULL;
 
 // 特征句柄相关变量
 static uint16_t char_0013_handle = 0;
+
+// GPIO中断相关变量
+static QueueHandle_t gpio_evt_queue = NULL;
+static intr_handle_t gpio_intr_handle = NULL;
 
 /* Declare static functions */
 static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
@@ -67,6 +88,10 @@ static void enumerate_all_chars_in_service(esp_gatt_if_t gattc_if, uint16_t conn
 static void discover_all_characteristics_after_service_discovery(esp_gatt_if_t gattc_if, uint16_t conn_id);
 static void uuid_string_to_bytes(const char* uuid_str, uint8_t* uuid_bytes);
 static void send_data_to_char_0013(void);
+static void gpio_isr_handler(void* arg);
+static void gpio_button_task(void* arg);
+static void init_gpio_button(void);
+static void simulate_button_press(void);
 static void button_test_task(void* arg);
 
 
@@ -614,10 +639,11 @@ void app_main(void)
         ESP_LOGE(GATTC_TAG, "set local  MTU failed, error code = %x", local_mtu_ret);
     }
 
-    // 创建按键测试任务
-    ESP_LOGI(GATTC_TAG, "Creating button test task");
-    ESP_LOGI(GATTC_TAG, "Note: This is a simulation. In real hardware, connect a button to GPIO18");
-    xTaskCreate(button_test_task, "button_test_task", 4096, NULL, 5, NULL);
+    // 初始化GPIO按键中断
+    init_gpio_button();
+    
+    // 创建按键测试任务（每15秒模拟一次按键）
+    // xTaskCreate(button_test_task, "button_test", 2048, NULL, 5, NULL);
 
 
     /*
@@ -1085,28 +1111,156 @@ static void uuid_string_to_bytes(const char* uuid_str, uint8_t* uuid_bytes)
  */
 
 /**
- * @brief 按键测试任务（模拟GPIO18按键）
- * 
- * 这个任务每30秒自动发送一次数据到0x0013特征
- * 在实际硬件中，您需要：
- * 1. 连接一个按键到GPIO18和GND
- * 2. 实现真正的GPIO中断处理
- * 3. 在中断中调用send_data_to_char_0013()函数
+ * @brief GPIO中断服务程序
+ *
+ * 使用ESP-IDF官方API的GPIO中断处理函数
+ * 在中断上下文中执行，处理GPIO18的下降沿中断
  */
-static void button_test_task(void* arg)
+static void IRAM_ATTR gpio_isr_handler(void* arg)
 {
-    ESP_LOGI(GATTC_TAG, "Button test task started");
-    ESP_LOGI(GATTC_TAG, "Will send data every 30 seconds (simulating button press)");
+    uint32_t gpio_num = (uint32_t) arg;  // 从参数获取GPIO编号
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    // 发送GPIO事件到队列
+    xQueueSendFromISR(gpio_evt_queue, &gpio_num, &xHigherPriorityTaskWoken);
+
+    // 如果有更高优先级的任务被唤醒，进行任务切换
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+/**
+ * @brief GPIO按键处理任务
+ * 
+ * 基于中断的GPIO18按键处理
+ * 等待中断事件并实现防抖动和数据发送逻辑
+ */
+static void gpio_button_task(void* arg)
+{
+    TickType_t last_press_time = 0;
+    const TickType_t debounce_delay = pdMS_TO_TICKS(200); // 200ms防抖动
+    
+    // 防止过度发送的保护机制
+    int send_count = 0;
+    TickType_t send_count_reset_time = xTaskGetTickCount();
+    const int max_sends_per_minute = 10; // 每分钟最多发送10次
+    
+    ESP_LOGI(GATTC_TAG, "🚀 GPIO button task started - interrupt-driven mode");
+    ESP_LOGI(GATTC_TAG, "⚡ Waiting for GPIO18 falling edge interrupts");
+    ESP_LOGI(GATTC_TAG, "🛡️ Protection: Max %d sends per minute", max_sends_per_minute);
+    
+    uint32_t io_num;
     
     while(1) {
-        // 等待30秒
-        vTaskDelay(pdMS_TO_TICKS(30000));
-        
-        ESP_LOGI(GATTC_TAG, "=== Simulating GPIO18 button press ===");
-        
-        // 发送数据到0x0013特征
-        send_data_to_char_0013();
+        // 等待中断事件（阻塞等待，不消耗CPU）
+        if(xQueueReceive(gpio_evt_queue, &io_num, portMAX_DELAY)) {
+            TickType_t current_time = xTaskGetTickCount();
+            
+            ESP_LOGI(GATTC_TAG, "⚡ GPIO%d interrupt triggered!", io_num);
+            
+            // 重置发送计数器（每分钟）
+            if ((current_time - send_count_reset_time) > pdMS_TO_TICKS(60000)) {
+                send_count = 0;
+                send_count_reset_time = current_time;
+                ESP_LOGI(GATTC_TAG, "🔄 Send counter reset");
+            }
+            
+            // 检查发送频率限制
+            if (send_count >= max_sends_per_minute) {
+                ESP_LOGW(GATTC_TAG, "🚫 Send rate limit reached! (%d/%d per minute)", 
+                         send_count, max_sends_per_minute);
+            } else {
+                // 防抖动：检查距离上次按键是否超过防抖动时间
+                if ((current_time - last_press_time) > debounce_delay) {
+                    last_press_time = current_time;
+                    send_count++;
+                    
+                    // 读取当前GPIO状态确认
+                    uint32_t gpio_level = (REG_READ(GPIO_IN_REG) >> GPIO_BUTTON_PIN) & 0x1;
+                    ESP_LOGI(GATTC_TAG, "📍 Current GPIO18 level: %d", gpio_level);
+                    
+                    ESP_LOGI(GATTC_TAG, "=== ✅ GPIO18 button pressed! Sending data... (%d/%d) ===", 
+                             send_count, max_sends_per_minute);
+                    
+                    // 发送数据到0x0013特征
+                    send_data_to_char_0013();
+                } else {
+                    uint32_t time_since_last = (current_time - last_press_time) * portTICK_PERIOD_MS;
+                    ESP_LOGW(GATTC_TAG, "⏰ Button press ignored (debounce: %dms < 200ms)", time_since_last);
+                }
+            }
+        }
     }
+}
+
+/**
+ * @brief 初始化GPIO按键中断
+ *
+ * 使用ESP-IDF官方推荐的GPIO API配置GPIO18中断
+ * 配置为输入模式，启用内部上拉电阻，设置下降沿中断触发
+ */
+static void init_gpio_button(void)
+{
+    ESP_LOGI(GATTC_TAG, "🔧 Initializing GPIO18 interrupt using official ESP-IDF API...");
+
+    // 1. 创建GPIO事件队列
+    gpio_evt_queue = xQueueCreate(10, sizeof(uint32_t));
+    if (gpio_evt_queue == NULL) {
+        ESP_LOGE(GATTC_TAG, "❌ Failed to create GPIO event queue");
+        return;
+    }
+
+    // 2. 创建GPIO按键处理任务
+    BaseType_t task_ret = xTaskCreate(gpio_button_task, "gpio_button_task", 4096, NULL, 10, NULL);
+    if (task_ret != pdPASS) {
+        ESP_LOGE(GATTC_TAG, "❌ Failed to create GPIO button task");
+        vQueueDelete(gpio_evt_queue);
+        return;
+    }
+
+    // 3. 使用官方GPIO API配置GPIO18
+    gpio_config_t io_conf = {
+        .intr_type = GPIO_INTR_NEGEDGE,        // 下降沿触发
+        .mode = GPIO_MODE_INPUT,               // 输入模式
+        .pin_bit_mask = (1ULL << GPIO_BUTTON_PIN), // GPIO18位掩码
+        .pull_down_en = GPIO_PULLDOWN_DISABLE, // 禁用下拉
+        .pull_up_en = GPIO_PULLUP_ENABLE,      // 启用上拉
+    };
+
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(GATTC_TAG, "❌ Failed to configure GPIO: 0x%x", ret);
+        vQueueDelete(gpio_evt_queue);
+        return;
+    }
+
+    // 4. 安装GPIO中断服务
+    ret = gpio_install_isr_service(ESP_INTR_FLAG_DEFAULT);
+    if (ret != ESP_OK) {
+        ESP_LOGE(GATTC_TAG, "❌ Failed to install GPIO ISR service: 0x%x", ret);
+        vQueueDelete(gpio_evt_queue);
+        return;
+    }
+
+    // 5. 为GPIO18添加中断处理函数
+    ret = gpio_isr_handler_add(GPIO_BUTTON_PIN, gpio_isr_handler, (void*) GPIO_BUTTON_PIN);
+    if (ret != ESP_OK) {
+        ESP_LOGE(GATTC_TAG, "❌ Failed to add GPIO ISR handler: 0x%x", ret);
+        gpio_uninstall_isr_service();
+        vQueueDelete(gpio_evt_queue);
+        return;
+    }
+
+    // 6. 读取初始GPIO状态
+    int gpio_level = gpio_get_level(GPIO_BUTTON_PIN);
+    ESP_LOGI(GATTC_TAG, "📍 Initial GPIO18 level: %d", gpio_level);
+
+    ESP_LOGI(GATTC_TAG, "✅ GPIO18 interrupt initialized successfully using official API");
+    ESP_LOGI(GATTC_TAG, "🔌 Hardware setup: Connect button between GPIO18 and GND");
+    ESP_LOGI(GATTC_TAG, "⚡ Interrupt mode: Falling edge trigger (button press)");
+    ESP_LOGI(GATTC_TAG, "🎯 Button press will trigger immediate interrupt");
+    ESP_LOGI(GATTC_TAG, "💡 Using gpio_install_isr_service() + gpio_isr_handler_add()");
 }
 
 /**
@@ -1148,5 +1302,39 @@ static void send_data_to_char_0013(void)
         ESP_LOGE(GATTC_TAG, "Write characteristic failed, error code = %x", ret);
     } else {
         ESP_LOGI(GATTC_TAG, "Write characteristic success");
+    }
+}
+
+/**
+ * @brief 模拟按键按下
+ * 
+ * 向GPIO事件队列发送按键事件
+ */
+static void simulate_button_press(void)
+{
+    if (gpio_evt_queue != NULL) {
+        uint32_t gpio_num = GPIO_BUTTON_PIN;
+        BaseType_t ret = xQueueSend(gpio_evt_queue, &gpio_num, pdMS_TO_TICKS(100));
+        if (ret != pdTRUE) {
+            ESP_LOGW(GATTC_TAG, "Failed to send button event to queue");
+        }
+    } else {
+        ESP_LOGW(GATTC_TAG, "GPIO event queue not initialized");
+    }
+}
+
+/**
+ * @brief 按键测试任务
+ * 
+ * 每15秒模拟一次按键按下，用于测试功能
+ */
+static void button_test_task(void* arg)
+{
+    ESP_LOGI(GATTC_TAG, "Button test task started - will simulate button press every 15 seconds");
+    
+    while(1) {
+        vTaskDelay(pdMS_TO_TICKS(15000)); // 等待15秒
+        ESP_LOGI(GATTC_TAG, "🧪 Simulating button press for testing...");
+        simulate_button_press();
     }
 }
