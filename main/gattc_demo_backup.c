@@ -4,16 +4,14 @@
  * SPDX-License-Identifier: Unlicense OR CC0-1.0
  */
 
+
+
 /****************************************************************************
 *
-* 模块化的BLE GATT客户端演示程序
-* 集成WiFi连接、NTP时间同步、GPIO按键中断和BLE通信功能
-*
-* 架构特点：
-* - 模块化设计，各功能独立
-* - 统一的配置管理
-* - 清晰的接口定义
-* - 完善的错误处理
+* This demo showcases BLE GATT client. It can scan BLE devices and connect to one device.
+* Run the gatt_server demo, the client demo will automatically connect to the gatt_server demo.
+* Client demo will enable gatt_server's notify after connection. The two devices will then exchange
+* data.
 *
 ****************************************************************************/
 
@@ -24,40 +22,53 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
-// BLE相关头文件
 #include "esp_bt.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gattc_api.h"
 #include "esp_gatt_defs.h"
 #include "esp_bt_main.h"
 #include "esp_gatt_common_api.h"
-
-// FreeRTOS相关头文件
-#include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-
-// 系统相关头文件
+#include "soc/gpio_reg.h"
+#include "soc/soc.h"
 #include "esp_system.h"
+#include "esp_intr_alloc.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "driver/gpio.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "esp_sntp.h"
+#include "lwip/err.h"
+#include "lwip/sys.h"
+#include <time.h>
+#include <sys/time.h>
 
-// 自定义模块头文件
-#include "app_config.h"
-#include "wifi_manager.h"
-#include "ntp_time.h"
-#include "gpio_button.h"
+#define GATTC_TAG "GATTC_DEMO"
+#define REMOTE_SERVICE_UUID        0x00FF
+#define REMOTE_NOTIFY_CHAR_UUID    0xFF01
+#define PROFILE_NUM      1
+#define PROFILE_A_APP_ID 0
+#define INVALID_HANDLE   0
 
-// 应用程序状态管理
-typedef struct {
-    bool wifi_connected;
-    bool ntp_synced;
-    bool ble_connected;
-    bool gpio_initialized;
-    char current_time[64];
-    char ip_address[32];
-} app_state_t;
+// 自定义特征UUID
+#define CUSTOM_CHAR_UUID_0013      0x0013
 
-static app_state_t app_state = {0};
+// GPIO按键配置
+#define GPIO_BUTTON_PIN            18
+#define GPIO_BUTTON_LEVEL          0
+#define ESP_INTR_FLAG_DEFAULT      0
+
+// GPIO中断相关寄存器
+#include "soc/gpio_struct.h"
+#include "hal/gpio_ll.h"
+#include "soc/io_mux_reg.h"
+#include "esp_intr_alloc.h"
+#if CONFIG_EXAMPLE_INIT_DEINIT_LOOP
+#define EXAMPLE_TEST_COUNT 50
+#endif
 
 static char remote_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "CMB2320647-1992";
 static bool connect    = false;
