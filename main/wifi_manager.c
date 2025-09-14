@@ -154,33 +154,78 @@ esp_err_t wifi_manager_get_ip_string(char* ip_str, size_t max_len)
 esp_err_t wifi_manager_reconnect(void)
 {
     if (!wifi_mgr.initialized) {
+        ESP_LOGE(TAG, "WiFi manager not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
     ESP_LOGI(TAG, "WiFi reconnect requested...");
 
-    // 重置重试计数
+    // 检查当前WiFi状态
+    wifi_ap_record_t ap_info;
+    esp_err_t ret = esp_wifi_sta_get_ap_info(&ap_info);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Current AP: %s, RSSI: %d", ap_info.ssid, ap_info.rssi);
+    }
+
+    // 重置重试计数和状态
     wifi_mgr.retry_count = 0;
     wifi_mgr.state = WIFI_STATE_CONNECTING;
 
     // 安全地断开连接
-    esp_err_t ret = esp_wifi_disconnect();
+    ret = esp_wifi_disconnect();
     if (ret != ESP_OK && ret != ESP_ERR_WIFI_NOT_CONNECT) {
-        ESP_LOGW(TAG, "WiFi disconnect failed: %s", esp_err_to_name(ret));
+        ESP_LOGW(TAG, "WiFi disconnect warning: %s", esp_err_to_name(ret));
+        // 不要因为断开失败就返回错误，继续尝试连接
     }
 
-    // 等待一小段时间确保断开完成
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // 等待断开完成
+    vTaskDelay(pdMS_TO_TICKS(200));
 
     // 重新连接
     ret = esp_wifi_connect();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "WiFi connect failed: %s", esp_err_to_name(ret));
         wifi_mgr.state = WIFI_STATE_FAILED;
+
+        // 调用失败回调
+        if (wifi_mgr.config.event_callback) {
+            wifi_mgr.config.event_callback(WIFI_STATE_FAILED, wifi_mgr.config.user_data);
+        }
         return ret;
     }
 
-    ESP_LOGI(TAG, "WiFi reconnecting...");
+    ESP_LOGI(TAG, "WiFi reconnect initiated successfully");
+    return ESP_OK;
+}
+
+esp_err_t wifi_manager_get_connection_info(char* info_str, size_t max_len)
+{
+    if (!info_str || max_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!wifi_manager_is_connected()) {
+        snprintf(info_str, max_len, "WiFi: 未连接 (状态: %d)", wifi_mgr.state);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    wifi_ap_record_t ap_info;
+    esp_err_t ret = esp_wifi_sta_get_ap_info(&ap_info);
+    if (ret != ESP_OK) {
+        snprintf(info_str, max_len, "WiFi: 已连接但无法获取AP信息");
+        return ret;
+    }
+
+    esp_netif_ip_info_t ip_info;
+    ret = esp_netif_get_ip_info(wifi_mgr.netif, &ip_info);
+    if (ret != ESP_OK) {
+        snprintf(info_str, max_len, "WiFi: 已连接到 %s，但无法获取IP信息", ap_info.ssid);
+        return ret;
+    }
+
+    snprintf(info_str, max_len, "WiFi: %s, IP: " IPSTR ", RSSI: %d dBm",
+             ap_info.ssid, IP2STR(&ip_info.ip), ap_info.rssi);
+
     return ESP_OK;
 }
 

@@ -21,7 +21,7 @@ static struct {
 } gpio_btn = {0};
 
 // 前向声明
-static void IRAM_ATTR gpio_button_isr_handler(void* arg);
+static void gpio_button_isr_handler(void* arg);
 static void gpio_button_task(void* arg);
 
 esp_err_t gpio_button_init(const gpio_button_config_t* config)
@@ -237,66 +237,115 @@ static void gpio_button_task(void* arg)
     uint32_t io_num;
     TickType_t last_event_time = 0;
     bool button_pressed = false;
+    int last_gpio_level = 1; // 假设初始状态为高电平（未按下）
 
     ESP_LOGI(TAG, "GPIO button task started");
 
+    // 读取初始GPIO状态
+    last_gpio_level = gpio_get_level(gpio_btn.config.gpio_num);
+    ESP_LOGI(TAG, "Initial GPIO level: %d", last_gpio_level);
+
     while (1) {
-        if (xQueueReceive(gpio_btn.event_queue, &io_num, pdMS_TO_TICKS(1000))) {
-            TickType_t current_time = xTaskGetTickCount();
-            
+        bool event_received = false;
+        TickType_t current_time = xTaskGetTickCount();
+
+        // 检查是否有中断事件
+        if (xQueueReceive(gpio_btn.event_queue, &io_num, pdMS_TO_TICKS(50))) {
+            event_received = true;
+
             // 验证GPIO编号
             if (io_num != gpio_btn.config.gpio_num) {
                 continue;
             }
+        }
+
+        // 读取当前GPIO状态
+        int current_gpio_level = gpio_get_level(gpio_btn.config.gpio_num);
+
+        // 检测状态变化（无论是否有中断事件）
+        if (current_gpio_level != last_gpio_level || event_received) {
 
             // 防抖动检查
             if ((current_time - last_event_time) < pdMS_TO_TICKS(gpio_btn.config.debounce_time_ms)) {
                 continue;
             }
 
-            last_event_time = current_time;
-            int gpio_level = gpio_get_level(gpio_btn.config.gpio_num);
+            // 确认状态确实发生了变化
+            if (current_gpio_level != last_gpio_level) {
+                last_event_time = current_time;
+                last_gpio_level = current_gpio_level;
 
-            gpio_button_event_data_t event_data = {
-                .gpio_num = io_num,
-                .timestamp = xTaskGetTickCount() * portTICK_PERIOD_MS
-            };
+                gpio_button_event_data_t event_data = {
+                    .gpio_num = gpio_btn.config.gpio_num,
+                    .timestamp = current_time * portTICK_PERIOD_MS
+                };
 
-            if (gpio_level == 0 && !button_pressed) {
-                // 按键按下
-                button_pressed = true;
-                gpio_btn.press_start_time = current_time;
-                event_data.event = GPIO_BUTTON_EVENT_PRESSED;
-                event_data.press_duration_ms = 0;
+                if (current_gpio_level == 0 && !button_pressed) {
+                    // 按键按下（下降沿）
+                    button_pressed = true;
+                    gpio_btn.press_start_time = current_time;
+                    event_data.event = GPIO_BUTTON_EVENT_PRESSED;
+                    event_data.press_duration_ms = 0;
 
-                gpio_btn.total_presses++;
-                gpio_btn.last_press_time = event_data.timestamp;
+                    gpio_btn.total_presses++;
+                    gpio_btn.last_press_time = event_data.timestamp;
 
-                ESP_LOGI(TAG, "Button pressed");
+                    ESP_LOGI(TAG, "Button pressed (level: %d)", current_gpio_level);
 
-                // 调用回调函数
-                if (gpio_btn.config.event_callback) {
-                    gpio_btn.config.event_callback(&event_data, gpio_btn.config.user_data);
+                    // 调用回调函数
+                    if (gpio_btn.config.event_callback) {
+                        gpio_btn.config.event_callback(&event_data, gpio_btn.config.user_data);
+                    }
+
+                } else if (current_gpio_level == 1 && button_pressed) {
+                    // 按键释放（上升沿）
+                    button_pressed = false;
+                    uint32_t press_duration = (current_time - gpio_btn.press_start_time) * portTICK_PERIOD_MS;
+
+                    if (press_duration >= gpio_btn.config.long_press_time_ms) {
+                        event_data.event = GPIO_BUTTON_EVENT_LONG_PRESSED;
+                        ESP_LOGI(TAG, "Button long pressed (%d ms, level: %d)", press_duration, current_gpio_level);
+                    } else {
+                        event_data.event = GPIO_BUTTON_EVENT_RELEASED;
+                        ESP_LOGI(TAG, "Button released (%d ms, level: %d)", press_duration, current_gpio_level);
+                    }
+
+                    event_data.press_duration_ms = press_duration;
+
+                    // 调用回调函数
+                    if (gpio_btn.config.event_callback) {
+                        gpio_btn.config.event_callback(&event_data, gpio_btn.config.user_data);
+                    }
                 }
+            }
+        }
 
-            } else if (gpio_level == 1 && button_pressed) {
-                // 按键释放
-                button_pressed = false;
-                uint32_t press_duration = (current_time - gpio_btn.press_start_time) * portTICK_PERIOD_MS;
-                
-                if (press_duration >= gpio_btn.config.long_press_time_ms) {
-                    event_data.event = GPIO_BUTTON_EVENT_LONG_PRESSED;
-                    ESP_LOGI(TAG, "Button long pressed (%d ms)", press_duration);
-                } else {
-                    event_data.event = GPIO_BUTTON_EVENT_RELEASED;
-                    ESP_LOGI(TAG, "Button released (%d ms)", press_duration);
-                }
+        // 检查长按状态（即使没有释放）
+        if (button_pressed) {
+            uint32_t current_press_duration = (current_time - gpio_btn.press_start_time) * portTICK_PERIOD_MS;
 
-                event_data.press_duration_ms = press_duration;
+            // 如果按键持续时间超过长按阈值，且还没有触发长按事件
+            if (current_press_duration >= gpio_btn.config.long_press_time_ms &&
+                current_gpio_level == 0) {
 
-                // 调用回调函数
-                if (gpio_btn.config.event_callback) {
-                    gpio_btn.config.event_callback(&event_data, gpio_btn.config.user_data);
+                // 检查是否已经触发过长按事件（避免重复触发）
+                static TickType_t last_long_press_time = 0;
+                if ((current_time - last_long_press_time) > pdMS_TO_TICKS(gpio_btn.config.long_press_time_ms)) {
+                    last_long_press_time = current_time;
+
+                    gpio_button_event_data_t event_data = {
+                        .gpio_num = gpio_btn.config.gpio_num,
+                        .timestamp = current_time * portTICK_PERIOD_MS,
+                        .event = GPIO_BUTTON_EVENT_LONG_PRESSED,
+                        .press_duration_ms = current_press_duration
+                    };
+
+                    ESP_LOGI(TAG, "Button long pressed (ongoing: %d ms)", current_press_duration);
+
+                    // 调用回调函数
+                    if (gpio_btn.config.event_callback) {
+                        gpio_btn.config.event_callback(&event_data, gpio_btn.config.user_data);
+                    }
                 }
             }
         }

@@ -83,9 +83,18 @@ esp_err_t wifi_manager_get_ip_string(char* ip_str, size_t max_len);
 esp_err_t wifi_manager_reconnect(void);
 
 /**
+ * @brief 获取WiFi连接信息
+ *
+ * @param info_str 输出缓冲区
+ * @param max_len 缓冲区最大长度
+ * @return esp_err_t
+ */
+esp_err_t wifi_manager_get_connection_info(char* info_str, size_t max_len);
+
+/**
  * @brief 反初始化WiFi管理器
- * 
- * @return esp_err_t 
+ *
+ * @return esp_err_t
  */
 esp_err_t wifi_manager_deinit(void);
 

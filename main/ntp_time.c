@@ -52,12 +52,22 @@ esp_err_t ntp_time_start_sync(void)
         return ESP_ERR_INVALID_STATE;
     }
 
+    // 检查SNTP是否已经在运行
+    if (esp_sntp_enabled()) {
+        ESP_LOGW(TAG, "SNTP already running, stopping first...");
+        esp_sntp_stop();
+        vTaskDelay(pdMS_TO_TICKS(100)); // 等待停止完成
+    }
+
+    ESP_LOGI(TAG, "Starting NTP sync with server: %s", ntp_mgr.config.primary_server);
+
     // 配置SNTP
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, ntp_mgr.config.primary_server);
-    
+
     if (strlen(ntp_mgr.config.backup_server) > 0) {
         esp_sntp_setservername(1, ntp_mgr.config.backup_server);
+        ESP_LOGI(TAG, "Backup NTP server: %s", ntp_mgr.config.backup_server);
     }
 
     // 设置同步回调
@@ -67,7 +77,7 @@ esp_err_t ntp_time_start_sync(void)
     esp_sntp_init();
 
     ntp_mgr.state = NTP_STATE_SYNCING;
-    ESP_LOGI(TAG, "NTP sync started with server: %s", ntp_mgr.config.primary_server);
+    ESP_LOGI(TAG, "NTP sync started successfully");
 
     return ESP_OK;
 }
@@ -169,17 +179,33 @@ time_t ntp_time_get_timestamp(void)
 esp_err_t ntp_time_force_sync(void)
 {
     if (!ntp_mgr.initialized) {
+        ESP_LOGE(TAG, "NTP time module not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
-    // 重启SNTP同步
-    esp_sntp_stop();
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
+    ESP_LOGI(TAG, "Force NTP sync requested");
+
+    // 安全地重启SNTP同步
+    if (esp_sntp_enabled()) {
+        ESP_LOGI(TAG, "Stopping current SNTP session...");
+        esp_sntp_stop();
+        vTaskDelay(pdMS_TO_TICKS(200)); // 增加等待时间确保完全停止
+    }
+
+    // 重新配置并启动
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, ntp_mgr.config.primary_server);
+
+    if (strlen(ntp_mgr.config.backup_server) > 0) {
+        esp_sntp_setservername(1, ntp_mgr.config.backup_server);
+    }
+
+    sntp_set_time_sync_notification_cb(sntp_sync_time_cb);
+
     ntp_mgr.state = NTP_STATE_SYNCING;
     esp_sntp_init();
 
-    ESP_LOGI(TAG, "Force NTP sync started");
+    ESP_LOGI(TAG, "Force NTP sync started successfully");
     return ESP_OK;
 }
 
