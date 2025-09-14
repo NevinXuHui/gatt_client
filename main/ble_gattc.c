@@ -207,9 +207,15 @@ esp_err_t ble_gattc_start_scan(void)
 
     ESP_LOGI(TAG, "Starting BLE scan...");
 
-    // 先停止任何现有的扫描
-    esp_ble_gap_stop_scanning();
-    vTaskDelay(pdMS_TO_TICKS(100));  // 等待100ms确保停止完成
+    // 只有在扫描状态时才停止扫描
+    if (ble_gattc.state == BLE_GATTC_STATE_SCANNING) {
+        ESP_LOGI(TAG, "Stopping existing scan first...");
+        esp_err_t stop_ret = esp_ble_gap_stop_scanning();
+        if (stop_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Stop scanning failed: %s", esp_err_to_name(stop_ret));
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));  // 等待100ms确保停止完成
+    }
 
     esp_err_t ret = esp_ble_gap_set_scan_params(&ble_scan_params);
     if (ret != ESP_OK) {
