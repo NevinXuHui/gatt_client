@@ -1167,13 +1167,14 @@ static void gpio_button_task(void* arg)
                 last_press_time = current_time;
 
                 ESP_LOGI(GATTC_TAG, "Button pressed! Sending data...");
-
-                // 安全发送数据
-                if (gl_profile_tab[PROFILE_A_APP_ID].char_handle != 0) {
                     send_data_to_char_0013();
-                } else {
-                    ESP_LOGW(GATTC_TAG, "Characteristic not ready, skipping send");
-                }
+
+                // // 安全发送数据
+                // if (gl_profile_tab[PROFILE_A_APP_ID].char_handle != 0) {
+                //     send_data_to_char_0013();
+                // } else {
+                //     ESP_LOGW(GATTC_TAG, "Characteristic not ready, skipping send");
+                // }
             } else {
                 ESP_LOGD(GATTC_TAG, "Button press ignored (debounce)");
             }
