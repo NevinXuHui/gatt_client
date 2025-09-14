@@ -268,10 +268,21 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         if (wifi_mgr.retry_count < wifi_mgr.config.max_retry) {
-            esp_wifi_connect();
             wifi_mgr.retry_count++;
-            ESP_LOGI(TAG, "Retry to connect to the AP (%d/%d)", 
+            ESP_LOGI(TAG, "Retry to connect to the AP (%d/%d)",
                      wifi_mgr.retry_count, wifi_mgr.config.max_retry);
+
+            // 检查当前状态，避免重复连接
+            if (wifi_mgr.state != WIFI_STATE_CONNECTING) {
+                wifi_mgr.state = WIFI_STATE_CONNECTING;
+                esp_err_t ret = esp_wifi_connect();
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "WiFi reconnect failed: %s", esp_err_to_name(ret));
+                    wifi_mgr.state = WIFI_STATE_FAILED;
+                }
+            } else {
+                ESP_LOGW(TAG, "WiFi is already connecting, skip this retry");
+            }
         } else {
             xEventGroupSetBits(wifi_mgr.event_group, WIFI_FAIL_BIT);
             wifi_mgr.state = WIFI_STATE_FAILED;

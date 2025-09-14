@@ -35,6 +35,7 @@ typedef struct {
     uint32_t scan_count;
     uint32_t connect_count;
     uint32_t send_count;
+    uint32_t service_count;
 } ble_gattc_manager_t;
 
 static ble_gattc_manager_t ble_gattc = {0};
@@ -718,29 +719,36 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         break;
 
     case ESP_GATTC_SEARCH_RES_EVT:
-        ESP_LOGI(TAG, "=== Service Found ===");
-        ESP_LOGI(TAG, "Service UUID: 0x%04X", p_data->search_res.srvc_id.uuid.uuid.uuid16);
+        // 增加服务计数（每发现一个服务都计数）
+        ble_gattc.service_count++;
+
+        ESP_LOGI(TAG, "=== Service Found [%d] ===", ble_gattc.service_count);
+        ESP_LOGI(TAG, "Connection ID: %d", p_data->search_res.conn_id);
+        ESP_LOGI(TAG, "Primary Service: %s", p_data->search_res.is_primary ? "Yes" : "No");
         ESP_LOGI(TAG, "Start Handle: %d", p_data->search_res.start_handle);
         ESP_LOGI(TAG, "End Handle: %d", p_data->search_res.end_handle);
+        ESP_LOGI(TAG, "Instance ID: %d", p_data->search_res.srvc_id.inst_id);
+
+        // 打印服务UUID（支持16位和128位）
+        if (p_data->search_res.srvc_id.uuid.len == ESP_UUID_LEN_16) {
+            ESP_LOGI(TAG, "Service UUID: 0x%04X", p_data->search_res.srvc_id.uuid.uuid.uuid16);
+        } else if (p_data->search_res.srvc_id.uuid.len == ESP_UUID_LEN_32) {
+            ESP_LOGI(TAG, "Service UUID: 0x%08X", p_data->search_res.srvc_id.uuid.uuid.uuid32);
+        } else if (p_data->search_res.srvc_id.uuid.len == ESP_UUID_LEN_128) {
+            ESP_LOGI(TAG, "Service UUID: 128-bit UUID");
+            ESP_LOG_BUFFER_HEX(TAG, p_data->search_res.srvc_id.uuid.uuid.uuid128, 16);
+        }
 
         // 检查是否是目标服务
         if (p_data->search_res.srvc_id.uuid.len == ESP_UUID_LEN_16 &&
             p_data->search_res.srvc_id.uuid.uuid.uuid16 == ble_gattc.config.target_service_uuid) {
 
-            ESP_LOGI(TAG, "Target service found: 0x%04X", ble_gattc.config.target_service_uuid);
+            ESP_LOGI(TAG, "*** TARGET SERVICE FOUND ***");
             ble_gattc.service_start_handle = p_data->search_res.start_handle;
             ble_gattc.service_end_handle = p_data->search_res.end_handle;
-
-            // 搜索目标特征
-            esp_bt_uuid_t char_uuid;
-            char_uuid.len = ESP_UUID_LEN_16;
-            char_uuid.uuid.uuid16 = ble_gattc.config.target_char_uuid;
-
-            esp_ble_gattc_get_char_by_uuid(gattc_if, p_data->search_res.conn_id,
-                                          ble_gattc.service_start_handle,
-                                          ble_gattc.service_end_handle,
-                                          char_uuid, NULL, NULL);
         }
+
+        ESP_LOGI(TAG, "=====================");
         break;
 
     case ESP_GATTC_SEARCH_CMPL_EVT:
