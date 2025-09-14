@@ -751,18 +751,40 @@ static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
         } else {
             ESP_LOGI(TAG, "Service search completed successfully");
 
-            // 直接设置目标特征句柄（简化处理）
-            ble_gattc.target_char_handle = 0x0013;  // 根据原始代码设置
-            ESP_LOGI(TAG, "Target characteristic handle set to: 0x%04X", ble_gattc.target_char_handle);
+            // 动态发现UUID为0x0013的特征，获取其实际句柄值
+            ESP_LOGI(TAG, "Starting dynamic characteristic discovery for UUID 0x0013...");
 
-            ble_gattc.state = BLE_GATTC_STATE_READY;
-            ESP_LOGI(TAG, "BLE GATT client ready for communication");
+            // 尝试通过UUID查找特征（参考原始代码逻辑）
+            esp_bt_uuid_t target_uuid;
+            target_uuid.len = ESP_UUID_LEN_16;
+            target_uuid.uuid.uuid16 = 0x0013;
 
-            // 触发就绪事件
-            ble_gattc_event_data_t event_data = {
-                .event = BLE_GATTC_EVENT_READY
-            };
-            trigger_event_callback(BLE_GATTC_EVENT_READY, &event_data);
+            uint16_t char_count = 1;
+            esp_gattc_char_elem_t char_elem;
+
+            esp_gatt_status_t status = esp_ble_gattc_get_char_by_uuid(gattc_if, ble_gattc.conn_id,
+                                                                     ble_gattc.service_start_handle,
+                                                                     ble_gattc.service_end_handle,
+                                                                     target_uuid, &char_elem, &char_count);
+
+            if (status == ESP_GATT_OK && char_count > 0) {
+                // 成功找到特征，保存实际句柄值
+                ble_gattc.target_char_handle = char_elem.char_handle;
+                ESP_LOGI(TAG, "*** CUSTOM 0x0013 CHARACTERISTIC FOUND ***");
+                ESP_LOGI(TAG, "Handle saved for GPIO button functionality: %d", ble_gattc.target_char_handle);
+
+                ble_gattc.state = BLE_GATTC_STATE_READY;
+                ESP_LOGI(TAG, "BLE GATT client ready for communication");
+
+                // 触发就绪事件
+                ble_gattc_event_data_t event_data = {
+                    .event = BLE_GATTC_EVENT_READY
+                };
+                trigger_event_callback(BLE_GATTC_EVENT_READY, &event_data);
+            } else {
+                ESP_LOGE(TAG, "Failed to find characteristic with UUID 0x0013, status: %d", status);
+                ble_gattc.state = BLE_GATTC_STATE_ERROR;
+            }
         }
         break;
 
