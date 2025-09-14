@@ -1,4 +1,4 @@
-idf_component_register(SRCS "ble_gattc.c" "main.c"
+idf_component_register(SRCS "led_indicator.c" "ble_gattc.c" "main.c"
                            "wifi_manager.c"
                            "ntp_time.c"
                            "gpio_button.c"

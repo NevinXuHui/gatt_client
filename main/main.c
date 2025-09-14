@@ -40,6 +40,7 @@
 #include "ntp_time.h"
 #include "gpio_button.h"
 #include "ble_gattc.h"
+#include "led_indicator.h"
 
 static const char* TAG = "MAIN_APP";
 
@@ -50,6 +51,7 @@ typedef struct {
     bool gpio_initialized;
     bool ble_initialized;
     bool ble_connected;
+    bool led_initialized;
     char current_time[64];
     char ip_address[32];
     char ble_device_name[32];
@@ -75,6 +77,7 @@ static esp_err_t app_wifi_init(void);
 static esp_err_t app_ntp_init(void);
 static esp_err_t app_gpio_init(void);
 static esp_err_t app_ble_init(void);
+static esp_err_t app_led_init(void);
 
 void app_main(void)
 {
@@ -107,6 +110,13 @@ void app_main(void)
     ret = app_gpio_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "GPIO初始化失败");
+        return;
+    }
+
+    // 初始化LED指示器
+    ret = app_led_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LED初始化失败");
         return;
     }
 
@@ -251,6 +261,33 @@ static esp_err_t app_ble_init(void)
     return ESP_OK;
 }
 
+static esp_err_t app_led_init(void)
+{
+    ESP_LOGI(TAG, "初始化LED指示器...");
+
+    // 配置LED指示器
+    led_config_t led_config = {
+        .gpio_num = CONFIG_BLINK_GPIO,
+        .on_level = LED_ON_LEVEL,
+        .off_level = LED_OFF_LEVEL,
+        .blink_period_ms = LED_BLINK_PERIOD_MS
+    };
+
+    esp_err_t ret = led_indicator_init(&led_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LED指示器初始化失败: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // 初始状态设置为关闭
+    led_indicator_off();
+
+    app_state.led_initialized = true;
+    ESP_LOGI(TAG, "LED指示器初始化成功，GPIO: %d", CONFIG_BLINK_GPIO);
+
+    return ESP_OK;
+}
+
 // WiFi事件回调
 static void wifi_event_callback(wifi_state_t state, void* user_data)
 {
@@ -375,6 +412,10 @@ static void ble_gattc_callback(const ble_gattc_event_data_t* event_data, void* u
     switch (event_data->event) {
         case BLE_GATTC_EVENT_SCAN_START:
             ESP_LOGI(TAG, "BLE扫描开始");
+            // LED开始闪烁表示扫描中
+            if (app->led_initialized) {
+                led_indicator_blink_fast();
+            }
             break;
 
         case BLE_GATTC_EVENT_DEVICE_FOUND:
@@ -383,16 +424,28 @@ static void ble_gattc_callback(const ble_gattc_event_data_t* event_data, void* u
                      event_data->device_found.device.rssi);
             strncpy(app->ble_device_name, event_data->device_found.device.name,
                     sizeof(app->ble_device_name) - 1);
+            // LED慢闪表示连接中
+            if (app->led_initialized) {
+                led_indicator_blink_slow();
+            }
             break;
 
         case BLE_GATTC_EVENT_CONNECTED:
             app->ble_connected = true;
             ESP_LOGI(TAG, "BLE设备连接成功: %s", event_data->connected.device.name);
+            // LED常亮表示连接成功
+            if (app->led_initialized) {
+                led_indicator_on();
+            }
             break;
 
         case BLE_GATTC_EVENT_DISCONNECTED:
             app->ble_connected = false;
             ESP_LOGI(TAG, "BLE设备断开连接，原因: %d", event_data->disconnected.reason);
+            // LED关闭表示断开连接
+            if (app->led_initialized) {
+                led_indicator_off();
+            }
             break;
 
         case BLE_GATTC_EVENT_SERVICE_DISCOVERED:

@@ -28,6 +28,18 @@
 #define GPIO_BUTTON_LEVEL          0
 #define GPIO_DEBOUNCE_TIME_MS      200
 
+// GPIO LED配置（参考ESP-IDF blink示例）
+// 常见开发板LED GPIO:
+// - ESP32-DevKitC: GPIO2 (内置蓝色LED)
+// - ESP32-WROVER-KIT: GPIO0 (红色LED)
+// - ESP32-S2-Saola: GPIO18
+// - ESP32-S3-DevKitC: GPIO48
+// - ESP32-C3-DevKitM: GPIO8
+#define CONFIG_BLINK_GPIO          0     // 当前使用GPIO5
+#define LED_ON_LEVEL              1     // LED点亮电平（高电平点亮）
+#define LED_OFF_LEVEL              2     // LED熄灭电平（低电平熄灭）
+#define LED_BLINK_PERIOD_MS        500   // LED闪烁周期（毫秒）
+
 // ==================== WiFi 配置 ====================
 
 // WiFi连接配置
