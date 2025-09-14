@@ -11,12 +11,15 @@
 // ==================== BLE GATT 配置 ====================
 
 // GATT客户端配置
-#define REMOTE_SERVICE_UUID        0x00FF
+#define REMOTE_SERVICE_UUID        0xD459
 #define REMOTE_NOTIFY_CHAR_UUID    0xFF01
 #define CUSTOM_CHAR_UUID_0013      0x0013
 #define PROFILE_NUM                1
 #define PROFILE_A_APP_ID           0
 #define INVALID_HANDLE             0
+#define BLE_TARGET_DEVICE_NAME     "CMB2320647-1992"
+#define BLE_SCAN_DURATION          0
+#define BLE_AUTO_RECONNECT         true
 
 // ==================== GPIO 配置 ====================
 
@@ -53,6 +56,8 @@
 #define GPIO_TASK_PRIORITY         5
 #define WIFI_TASK_PRIORITY         6
 #define NTP_TASK_PRIORITY          4
+#define BLE_TASK_STACK_SIZE        4096
+#define BLE_TASK_PRIORITY          7
 
 // ==================== 队列配置 ====================
 

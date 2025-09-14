@@ -39,6 +39,7 @@
 #include "wifi_manager.h"
 #include "ntp_time.h"
 #include "gpio_button.h"
+#include "ble_gattc.h"
 
 static const char* TAG = "MAIN_APP";
 
@@ -47,9 +48,13 @@ typedef struct {
     bool wifi_connected;
     bool ntp_synced;
     bool gpio_initialized;
+    bool ble_initialized;
+    bool ble_connected;
     char current_time[64];
     char ip_address[32];
+    char ble_device_name[32];
     uint32_t button_presses;
+    uint32_t ble_send_count;
 } app_state_t;
 
 static app_state_t app_state = {0};
@@ -58,6 +63,7 @@ static app_state_t app_state = {0};
 static void wifi_event_callback(wifi_state_t state, void* user_data);
 static void ntp_sync_callback(ntp_sync_state_t state, void* user_data);
 static void gpio_button_callback(const gpio_button_event_data_t* event_data, void* user_data);
+static void ble_gattc_callback(const ble_gattc_event_data_t* event_data, void* user_data);
 
 // 应用程序任务
 static void app_status_task(void* arg);
@@ -68,6 +74,7 @@ static esp_err_t app_nvs_init(void);
 static esp_err_t app_wifi_init(void);
 static esp_err_t app_ntp_init(void);
 static esp_err_t app_gpio_init(void);
+static esp_err_t app_ble_init(void);
 
 void app_main(void)
 {
@@ -100,6 +107,13 @@ void app_main(void)
     ret = app_gpio_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "GPIO初始化失败");
+        return;
+    }
+
+    // 初始化BLE GATT客户端
+    ret = app_ble_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "BLE初始化失败");
         return;
     }
 
@@ -194,6 +208,49 @@ static esp_err_t app_gpio_init(void)
     return ESP_OK;
 }
 
+static esp_err_t app_ble_init(void)
+{
+    ESP_LOGI(TAG, "初始化BLE GATT客户端...");
+
+    // 配置BLE GATT客户端
+    ble_gattc_config_t ble_config = {
+        .target_service_uuid = REMOTE_SERVICE_UUID,
+        .target_char_uuid = CUSTOM_CHAR_UUID_0013,
+        .scan_duration = BLE_SCAN_DURATION,
+        .auto_reconnect = BLE_AUTO_RECONNECT,
+        .event_callback = ble_gattc_callback,
+        .user_data = &app_state
+    };
+
+    // 复制目标设备名称
+    strncpy(ble_config.target_device_name, BLE_TARGET_DEVICE_NAME, sizeof(ble_config.target_device_name) - 1);
+    ble_config.target_device_name[sizeof(ble_config.target_device_name) - 1] = '\0';
+
+    esp_err_t ret = ble_gattc_init(&ble_config);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    ret = ble_gattc_start();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    app_state.ble_initialized = true;
+    ESP_LOGI(TAG, "BLE GATT客户端初始化成功");
+    ESP_LOGI(TAG, "目标设备: %s", BLE_TARGET_DEVICE_NAME);
+    ESP_LOGI(TAG, "目标服务: 0x%04X", REMOTE_SERVICE_UUID);
+    ESP_LOGI(TAG, "目标特征: 0x%04X", CUSTOM_CHAR_UUID_0013);
+
+    // 开始扫描
+    ret = ble_gattc_start_scan();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "BLE扫描启动失败: %s", esp_err_to_name(ret));
+    }
+
+    return ESP_OK;
+}
+
 // WiFi事件回调
 static void wifi_event_callback(wifi_state_t state, void* user_data)
 {
@@ -204,9 +261,14 @@ static void wifi_event_callback(wifi_state_t state, void* user_data)
             app->wifi_connected = true;
             wifi_manager_get_ip_string(app->ip_address, sizeof(app->ip_address));
             ESP_LOGI(TAG, "WiFi连接成功，IP地址: %s", app->ip_address);
-            
+
             // WiFi连接成功后启动NTP同步
-            ntp_time_start_sync();
+            esp_err_t ntp_ret = ntp_time_start_sync();
+            if (ntp_ret != ESP_OK) {
+                ESP_LOGE(TAG, "NTP同步启动失败: %s", esp_err_to_name(ntp_ret));
+            } else {
+                ESP_LOGI(TAG, "NTP同步已启动");
+            }
             break;
             
         case WIFI_STATE_DISCONNECTED:
@@ -256,7 +318,21 @@ static void gpio_button_callback(const gpio_button_event_data_t* event_data, voi
         case GPIO_BUTTON_EVENT_PRESSED:
             app->button_presses++;
             ESP_LOGI(TAG, "按键按下 (第%d次)", app->button_presses);
-            
+
+            // 按键按下时发送BLE数据
+            if (app->ble_connected) {
+                ESP_LOGI(TAG, "发送BLE按键数据...");
+                esp_err_t ret = ble_gattc_send_button_data();
+                if (ret == ESP_OK) {
+                    app->ble_send_count++;
+                    ESP_LOGI(TAG, "BLE数据发送成功 (第%d次)", app->ble_send_count);
+                } else {
+                    ESP_LOGE(TAG, "BLE数据发送失败: %s", esp_err_to_name(ret));
+                }
+            } else {
+                ESP_LOGW(TAG, "BLE未连接，无法发送数据");
+            }
+
             // 更新当前时间
             if (app->ntp_synced) {
                 ntp_time_get_formatted_time(app->current_time, sizeof(app->current_time), NULL);
@@ -291,6 +367,67 @@ static void gpio_button_callback(const gpio_button_event_data_t* event_data, voi
     }
 }
 
+// BLE GATT客户端事件回调
+static void ble_gattc_callback(const ble_gattc_event_data_t* event_data, void* user_data)
+{
+    app_state_t* app = (app_state_t*)user_data;
+
+    switch (event_data->event) {
+        case BLE_GATTC_EVENT_SCAN_START:
+            ESP_LOGI(TAG, "BLE扫描开始");
+            break;
+
+        case BLE_GATTC_EVENT_DEVICE_FOUND:
+            ESP_LOGI(TAG, "发现目标设备: %s (RSSI: %d dBm)",
+                     event_data->device_found.device.name,
+                     event_data->device_found.device.rssi);
+            strncpy(app->ble_device_name, event_data->device_found.device.name,
+                    sizeof(app->ble_device_name) - 1);
+            break;
+
+        case BLE_GATTC_EVENT_CONNECTED:
+            app->ble_connected = true;
+            ESP_LOGI(TAG, "BLE设备连接成功: %s", event_data->connected.device.name);
+            break;
+
+        case BLE_GATTC_EVENT_DISCONNECTED:
+            app->ble_connected = false;
+            ESP_LOGI(TAG, "BLE设备断开连接，原因: %d", event_data->disconnected.reason);
+            break;
+
+        case BLE_GATTC_EVENT_SERVICE_DISCOVERED:
+            ESP_LOGI(TAG, "BLE服务发现完成，发现 %d 个服务",
+                     event_data->service_discovered.service_count);
+            break;
+
+        case BLE_GATTC_EVENT_READY:
+            ESP_LOGI(TAG, "BLE GATT客户端就绪，可以发送数据");
+            break;
+
+        case BLE_GATTC_EVENT_DATA_SENT:
+            if (event_data->data_sent.success) {
+                ESP_LOGI(TAG, "BLE数据发送成功，句柄: %d", event_data->data_sent.char_handle);
+            } else {
+                ESP_LOGE(TAG, "BLE数据发送失败，句柄: %d", event_data->data_sent.char_handle);
+            }
+            break;
+
+        case BLE_GATTC_EVENT_DATA_RECEIVED:
+            ESP_LOGI(TAG, "收到BLE数据，长度: %d", event_data->data_received.data_len);
+            ESP_LOG_BUFFER_HEX(TAG, event_data->data_received.data, event_data->data_received.data_len);
+            break;
+
+        case BLE_GATTC_EVENT_ERROR:
+            ESP_LOGE(TAG, "BLE错误: %s (%s)",
+                     event_data->error.description,
+                     esp_err_to_name(event_data->error.error_code));
+            break;
+
+        default:
+            break;
+    }
+}
+
 // 应用程序状态监控任务
 static void app_status_task(void* arg)
 {
@@ -301,9 +438,16 @@ static void app_status_task(void* arg)
         vTaskDelay(pdMS_TO_TICKS(10000));
         
         ESP_LOGI(TAG, "=== 系统状态 ===");
-        ESP_LOGI(TAG, "WiFi: %s", app_state.wifi_connected ? "已连接" : "未连接");
-        if (app_state.wifi_connected) {
-            ESP_LOGI(TAG, "IP地址: %s", app_state.ip_address);
+
+        // 获取详细的WiFi连接信息
+        char wifi_info[128];
+        if (wifi_manager_get_connection_info(wifi_info, sizeof(wifi_info)) == ESP_OK) {
+            ESP_LOGI(TAG, "%s", wifi_info);
+        } else {
+            ESP_LOGI(TAG, "WiFi: %s", app_state.wifi_connected ? "已连接" : "未连接");
+            if (app_state.wifi_connected) {
+                ESP_LOGI(TAG, "IP地址: %s", app_state.ip_address);
+            }
         }
         ESP_LOGI(TAG, "NTP: %s", app_state.ntp_synced ? "已同步" : "未同步");
         if (app_state.ntp_synced) {
