@@ -436,18 +436,63 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
     case ESP_GAP_BLE_SCAN_RESULT_EVT: {
         esp_ble_gap_cb_param_t *scan_result = (esp_ble_gap_cb_param_t *)param;
         switch (scan_result->scan_rst.search_evt) {
-        case ESP_GAP_SEARCH_INQ_RES_EVT:
-#if CONFIG_EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP
-            if (scan_result->scan_rst.adv_data_len > 0) {
-                ESP_LOGI(GATTC_TAG, "adv data:");
-                ESP_LOG_BUFFER_HEX(GATTC_TAG, &scan_result->scan_rst.ble_adv[0], scan_result->scan_rst.adv_data_len);
+        case ESP_GAP_SEARCH_INQ_RES_EVT: {
+            // 从广播数据中提取设备名称
+            // 首先尝试从完整的广播数据（包括扫描响应）中获取完整设备名称
+            uint16_t total_adv_len = scan_result->scan_rst.adv_data_len + scan_result->scan_rst.scan_rsp_len;
+            adv_name = esp_ble_resolve_adv_data_by_type(scan_result->scan_rst.ble_adv,
+                                                       total_adv_len,
+                                                       ESP_BLE_AD_TYPE_NAME_CMPL,
+                                                       &adv_name_len);
+            
+            // 如果没有找到完整名称，尝试获取短名称
+            if (adv_name == NULL) {
+                adv_name = esp_ble_resolve_adv_data_by_type(scan_result->scan_rst.ble_adv,
+                                                           total_adv_len,
+                                                           ESP_BLE_AD_TYPE_NAME_SHORT,
+                                                           &adv_name_len);
             }
-            if (scan_result->scan_rst.scan_rsp_len > 0) {
-                ESP_LOGI(GATTC_TAG, "scan resp:");
-                ESP_LOG_BUFFER_HEX(GATTC_TAG, &scan_result->scan_rst.ble_adv[scan_result->scan_rst.adv_data_len], scan_result->scan_rst.scan_rsp_len);
+            
+            // 如果在总数据中没找到，分别在广播数据和扫描响应中查找
+            if (adv_name == NULL && scan_result->scan_rst.adv_data_len > 0) {
+                // 只在广播数据中查找
+                adv_name = esp_ble_resolve_adv_data_by_type(scan_result->scan_rst.ble_adv,
+                                                           scan_result->scan_rst.adv_data_len,
+                                                           ESP_BLE_AD_TYPE_NAME_CMPL,
+                                                           &adv_name_len);
+                if (adv_name == NULL) {
+                    adv_name = esp_ble_resolve_adv_data_by_type(scan_result->scan_rst.ble_adv,
+                                                               scan_result->scan_rst.adv_data_len,
+                                                               ESP_BLE_AD_TYPE_NAME_SHORT,
+                                                               &adv_name_len);
+                }
             }
-#endif
-
+            
+            // 如果还没找到且有扫描响应数据，在扫描响应中查找
+            if (adv_name == NULL && scan_result->scan_rst.scan_rsp_len > 0) {
+                uint8_t *scan_rsp_data = scan_result->scan_rst.ble_adv + scan_result->scan_rst.adv_data_len;
+                adv_name = esp_ble_resolve_adv_data_by_type(scan_rsp_data,
+                                                           scan_result->scan_rst.scan_rsp_len,
+                                                           ESP_BLE_AD_TYPE_NAME_CMPL,
+                                                           &adv_name_len);
+                if (adv_name == NULL) {
+                    adv_name = esp_ble_resolve_adv_data_by_type(scan_rsp_data,
+                                                               scan_result->scan_rst.scan_rsp_len,
+                                                               ESP_BLE_AD_TYPE_NAME_SHORT,
+                                                               &adv_name_len);
+                }
+            }
+            
+            // 显示扫描到的设备信息
+            ESP_LOGI(GATTC_TAG, "📱 Scanned device: "ESP_BD_ADDR_STR", RSSI %d dBm", 
+                     ESP_BD_ADDR_HEX(scan_result->scan_rst.bda), 
+                     scan_result->scan_rst.rssi);
+            
+            if (adv_name != NULL && adv_name_len > 0) {
+                ESP_LOGI(GATTC_TAG, "   Device Name: \"%.*s\" (len: %u)", adv_name_len, adv_name, adv_name_len);
+            } else {
+                ESP_LOGI(GATTC_TAG, "   Device Name: <Not Available>");
+            }
             // 使用新的设备匹配逻辑（优先设备名称，备用MAC地址）
             if (is_target_device(scan_result->scan_rst.bda, adv_name, adv_name_len)) {
                 ESP_LOGI(GATTC_TAG, "=== TARGET DEVICE FOUND ===");
@@ -476,6 +521,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
                 }
             }
             break;
+        }
         case ESP_GAP_SEARCH_INQ_CMPL_EVT:
             break;
         default:
