@@ -63,8 +63,14 @@
 #endif
 
 static char remote_device_name[ESP_BLE_ADV_NAME_LEN_MAX] = "CMB2320647-1992";
+static esp_bd_addr_t target_mac_addr = {0x44, 0xe5, 0x17, 0xb5, 0xd9, 0x56}; // 目标MAC地址：44:e5:17:b5:d9:56
+static bool use_mac_matching = true;       // 是否启用MAC地址匹配
 static bool connect    = false;
 static bool get_server = false;
+
+// 扫描统计
+static uint32_t scan_count = 0;             // 扫描到的设备总数
+static uint32_t named_device_count = 0;     // 有名称的设备数量
 static esp_gattc_char_elem_t *char_elem_result   = NULL;
 static esp_gattc_descr_elem_t *descr_elem_result = NULL;
 
@@ -91,6 +97,8 @@ static void send_data_to_char_0013(void);
 static void gpio_isr_handler(void* arg);
 static void gpio_button_task(void* arg);
 static void init_gpio_button(void);
+static void set_target_mac_address(const char* mac_str);
+static bool is_target_device(esp_bd_addr_t bda, uint8_t *adv_name, uint8_t adv_name_len);
 
 
 static esp_bt_uuid_t remote_filter_service_uuid = {
@@ -112,9 +120,9 @@ static esp_ble_scan_params_t ble_scan_params = {
     .scan_type              = BLE_SCAN_TYPE_ACTIVE,
     .own_addr_type          = BLE_ADDR_TYPE_PUBLIC,
     .scan_filter_policy     = BLE_SCAN_FILTER_ALLOW_ALL,
-    .scan_interval          = 0x50,
-    .scan_window            = 0x30,
-    .scan_duplicate         = BLE_SCAN_DUPLICATE_DISABLE
+    .scan_interval          = 0x100,   // 扫描间隔 160ms (更慢，更稳定)
+    .scan_window            = 0x80,    // 扫描窗口 80ms (50%占空比)
+    .scan_duplicate         = BLE_SCAN_DUPLICATE_ENABLE  // 启用重复过滤，减少处理量
 };
 
 struct gattc_profile_inst {
@@ -422,7 +430,7 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         // The unit of duration is seconds.
         // If duration is set to 0, scanning will continue indefinitely
         // until esp_ble_gap_stop_scanning is explicitly called.
-        uint32_t duration = 5;
+        uint32_t duration = 0;  // 设置为0，持续扫描
         esp_ble_gap_start_scanning(duration);
         break;
     }
@@ -439,21 +447,49 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         esp_ble_gap_cb_param_t *scan_result = (esp_ble_gap_cb_param_t *)param;
         switch (scan_result->scan_rst.search_evt) {
         case ESP_GAP_SEARCH_INQ_RES_EVT:
+            // 更新扫描统计
+            scan_count++;
+            
             // 使用我们的辅助函数来获取设备名称
             adv_name = get_device_name_from_adv_data(scan_result->scan_rst.ble_adv,
                                                    scan_result->scan_rst.adv_data_len,
                                                    scan_result->scan_rst.scan_rsp_len,
                                                    &adv_name_len);
             
-            ESP_LOGI(GATTC_TAG, "Scan result, device "ESP_BD_ADDR_STR", RSSI %d, name len %u", 
-                     ESP_BD_ADDR_HEX(scan_result->scan_rst.bda), 
-                     scan_result->scan_rst.rssi, 
-                     adv_name_len);
+            if (adv_name != NULL && adv_name_len > 0) {
+                named_device_count++;
+            }
+            
+            ESP_LOGI(GATTC_TAG, "📱 [%d] Scanned device: "ESP_BD_ADDR_STR", RSSI %d dBm", 
+                     scan_count, ESP_BD_ADDR_HEX(scan_result->scan_rst.bda), 
+                     scan_result->scan_rst.rssi);
             
             if (adv_name != NULL && adv_name_len > 0) {
+                ESP_LOGI(GATTC_TAG, "   Device Name: \"%.*s\" (len: %u)", adv_name_len, adv_name, adv_name_len);
                 ESP_LOG_BUFFER_CHAR(GATTC_TAG, adv_name, adv_name_len);
             } else {
-                ESP_LOGI(GATTC_TAG, "Device name not found");
+                ESP_LOGI(GATTC_TAG, "   Device Name: <Not Available>");
+            }
+            
+            // 显示匹配状态
+            bool name_match = (adv_name != NULL && strlen(remote_device_name) > 0 && 
+                             strlen(remote_device_name) == adv_name_len && 
+                             strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0);
+            bool mac_match = (use_mac_matching && 
+                            memcmp(scan_result->scan_rst.bda, target_mac_addr, ESP_BD_ADDR_LEN) == 0);
+            
+            if (name_match || mac_match) {
+                ESP_LOGI(GATTC_TAG, "   🎯 MATCH STATUS: %s%s", 
+                         name_match ? "NAME✅" : "NAME❌",
+                         use_mac_matching ? (mac_match ? " MAC✅" : " MAC❌") : " MAC⚪");
+            } else {
+                ESP_LOGD(GATTC_TAG, "   Match Status: No match");
+            }
+            
+            // 每扫描到10个设备显示一次统计
+            if (scan_count % 10 == 0) {
+                ESP_LOGI(GATTC_TAG, "📊 Scan Statistics: Total=%d, Named=%d, Unnamed=%d", 
+                         scan_count, named_device_count, scan_count - named_device_count);
             }
 
 #if CONFIG_EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP
@@ -467,25 +503,31 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             }
 #endif
 
-            if (adv_name != NULL) {
-                if (strlen(remote_device_name) == adv_name_len && strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0) {
-                    // Note: If there are multiple devices with the same device name, the device may connect to an unintended one.
-                    // It is recommended to change the default device name to ensure it is unique.
-                    ESP_LOGI(GATTC_TAG, "Device found %s", remote_device_name);
-                    if (connect == false) {
-                        connect = true;
-                        ESP_LOGI(GATTC_TAG, "Connect to the remote device");
-                        esp_ble_gap_stop_scanning();
-                        esp_ble_gatt_creat_conn_params_t creat_conn_params = {0};
-                        memcpy(&creat_conn_params.remote_bda, scan_result->scan_rst.bda, ESP_BD_ADDR_LEN);
-                        creat_conn_params.remote_addr_type = scan_result->scan_rst.ble_addr_type;
-                        creat_conn_params.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
-                        creat_conn_params.is_direct = true;
-                        creat_conn_params.is_aux = false;
-                        creat_conn_params.phy_mask = 0x0;
-                        esp_ble_gattc_enh_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
-                                            &creat_conn_params);
-                    }
+            // 使用新的设备匹配逻辑（优先设备名称，备用MAC地址）
+            if (is_target_device(scan_result->scan_rst.bda, adv_name, adv_name_len)) {
+                ESP_LOGI(GATTC_TAG, "=== TARGET DEVICE FOUND ===");
+                ESP_LOGI(GATTC_TAG, "Device Address: "ESP_BD_ADDR_STR, ESP_BD_ADDR_HEX(scan_result->scan_rst.bda));
+                if (adv_name != NULL && adv_name_len > 0) {
+                    ESP_LOGI(GATTC_TAG, "Device Name: %.*s", adv_name_len, adv_name);
+                }
+                ESP_LOGI(GATTC_TAG, "Match Method: %s", 
+                         (adv_name != NULL && strlen(remote_device_name) == adv_name_len && 
+                          strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0) ? 
+                         "Device Name (Primary)" : "MAC Address (Fallback)");
+                
+                if (connect == false) {
+                    connect = true;
+                    ESP_LOGI(GATTC_TAG, "Initiating connection to target device...");
+                    esp_ble_gap_stop_scanning();
+                    esp_ble_gatt_creat_conn_params_t creat_conn_params = {0};
+                    memcpy(&creat_conn_params.remote_bda, scan_result->scan_rst.bda, ESP_BD_ADDR_LEN);
+                    creat_conn_params.remote_addr_type = scan_result->scan_rst.ble_addr_type;
+                    creat_conn_params.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
+                    creat_conn_params.is_direct = true;
+                    creat_conn_params.is_aux = false;
+                    creat_conn_params.phy_mask = 0x0;
+                    esp_ble_gattc_enh_open(gl_profile_tab[PROFILE_A_APP_ID].gattc_if,
+                                        &creat_conn_params);
                 }
             }
             break;
@@ -639,6 +681,14 @@ void app_main(void)
 
     // 初始化GPIO按键中断
     init_gpio_button();
+    
+    // 显示目标设备配置
+    ESP_LOGI(GATTC_TAG, "=== TARGET DEVICE CONFIGURATION ===");
+    ESP_LOGI(GATTC_TAG, "Device Name: \"%s\"", remote_device_name);
+    ESP_LOGI(GATTC_TAG, "MAC Address: "ESP_BD_ADDR_STR, ESP_BD_ADDR_HEX(target_mac_addr));
+    ESP_LOGI(GATTC_TAG, "MAC Matching: %s", use_mac_matching ? "ENABLED" : "DISABLED");
+    ESP_LOGI(GATTC_TAG, "Match Priority: Name first, then MAC address");
+    ESP_LOGI(GATTC_TAG, "====================================");
     
     // 创建按键测试任务（每15秒模拟一次按键）
     // xTaskCreate(button_test_task, "button_test", 2048, NULL, 5, NULL);
@@ -1299,5 +1349,35 @@ static void send_data_to_char_0013(void)
         ESP_LOGI(GATTC_TAG, "Write characteristic success");
     }
 }
+
+/**
+ * @brief 检查是否是目标设备（优先设备名称，备用MAC地址）
+ * @param bda 设备的MAC地址
+ * @param adv_name 广播中的设备名称
+ * @param adv_name_len 设备名称长度
+ * @return true 如果是目标设备，false 否则
+ */
+static bool is_target_device(esp_bd_addr_t bda, uint8_t *adv_name, uint8_t adv_name_len)
+{
+    // 优先级1: 设备名称匹配
+    if (adv_name != NULL && strlen(remote_device_name) > 0) {
+        if (strlen(remote_device_name) == adv_name_len && 
+            strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0) {
+            ESP_LOGI(GATTC_TAG, "✅ Device matched by NAME: %.*s", adv_name_len, adv_name);
+            return true;
+        }
+    }
+    
+    // 优先级2: MAC地址匹配（如果启用）
+    if (use_mac_matching) {
+        if (memcmp(bda, target_mac_addr, ESP_BD_ADDR_LEN) == 0) {
+            ESP_LOGI(GATTC_TAG, "✅ Device matched by MAC: "ESP_BD_ADDR_STR, ESP_BD_ADDR_HEX(bda));
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 
 

@@ -2,7 +2,7 @@ menu "Example Configuration"
 
     config EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP
         bool "Dump whole adv data and scan response data in example"
-        default n
+        default y
 
     config EXAMPLE_CI_ID
         int "example id for CI test"
