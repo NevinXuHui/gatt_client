@@ -69,8 +69,6 @@ static bool connect    = false;
 static bool get_server = false;
 
 // 扫描统计
-static uint32_t scan_count = 0;             // 扫描到的设备总数
-static uint32_t named_device_count = 0;     // 有名称的设备数量
 static esp_gattc_char_elem_t *char_elem_result   = NULL;
 static esp_gattc_descr_elem_t *descr_elem_result = NULL;
 
@@ -79,32 +77,24 @@ static uint16_t char_0013_handle = 0;
 
 // GPIO中断相关变量
 static QueueHandle_t gpio_evt_queue = NULL;
-static intr_handle_t gpio_intr_handle = NULL;
 
 /* Declare static functions */
 static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param);
 static void esp_gattc_cb(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
 static void gattc_profile_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param);
-static uint8_t* get_device_name_from_adv_data(uint8_t *adv_data, uint16_t adv_data_len, uint16_t scan_rsp_len, uint8_t *name_len);
 static void print_uuid(esp_bt_uuid_t *uuid);
 static void print_char_properties(uint8_t properties);
 static void discover_all_services(esp_gatt_if_t gattc_if, uint16_t conn_id);
 static void discover_all_chars_in_service(esp_gatt_if_t gattc_if, uint16_t conn_id, uint16_t start_handle, uint16_t end_handle);
 static void enumerate_all_chars_in_service(esp_gatt_if_t gattc_if, uint16_t conn_id, uint16_t start_handle, uint16_t end_handle);
 static void discover_all_characteristics_after_service_discovery(esp_gatt_if_t gattc_if, uint16_t conn_id);
-static void uuid_string_to_bytes(const char* uuid_str, uint8_t* uuid_bytes);
 static void send_data_to_char_0013(void);
 static void gpio_isr_handler(void* arg);
 static void gpio_button_task(void* arg);
 static void init_gpio_button(void);
-static void set_target_mac_address(const char* mac_str);
 static bool is_target_device(esp_bd_addr_t bda, uint8_t *adv_name, uint8_t adv_name_len);
 
 
-static esp_bt_uuid_t remote_filter_service_uuid = {
-    .len = ESP_UUID_LEN_16,
-    .uuid = {.uuid16 = REMOTE_SERVICE_UUID,},
-};
 
 static esp_bt_uuid_t remote_filter_char_uuid = {
     .len = ESP_UUID_LEN_16,
@@ -447,51 +437,6 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
         esp_ble_gap_cb_param_t *scan_result = (esp_ble_gap_cb_param_t *)param;
         switch (scan_result->scan_rst.search_evt) {
         case ESP_GAP_SEARCH_INQ_RES_EVT:
-            // 更新扫描统计
-            scan_count++;
-            
-            // 使用我们的辅助函数来获取设备名称
-            adv_name = get_device_name_from_adv_data(scan_result->scan_rst.ble_adv,
-                                                   scan_result->scan_rst.adv_data_len,
-                                                   scan_result->scan_rst.scan_rsp_len,
-                                                   &adv_name_len);
-            
-            if (adv_name != NULL && adv_name_len > 0) {
-                named_device_count++;
-            }
-            
-            ESP_LOGI(GATTC_TAG, "📱 [%d] Scanned device: "ESP_BD_ADDR_STR", RSSI %d dBm", 
-                     scan_count, ESP_BD_ADDR_HEX(scan_result->scan_rst.bda), 
-                     scan_result->scan_rst.rssi);
-            
-            if (adv_name != NULL && adv_name_len > 0) {
-                ESP_LOGI(GATTC_TAG, "   Device Name: \"%.*s\" (len: %u)", adv_name_len, adv_name, adv_name_len);
-                ESP_LOG_BUFFER_CHAR(GATTC_TAG, adv_name, adv_name_len);
-            } else {
-                ESP_LOGI(GATTC_TAG, "   Device Name: <Not Available>");
-            }
-            
-            // 显示匹配状态
-            bool name_match = (adv_name != NULL && strlen(remote_device_name) > 0 && 
-                             strlen(remote_device_name) == adv_name_len && 
-                             strncmp((char *)adv_name, remote_device_name, adv_name_len) == 0);
-            bool mac_match = (use_mac_matching && 
-                            memcmp(scan_result->scan_rst.bda, target_mac_addr, ESP_BD_ADDR_LEN) == 0);
-            
-            if (name_match || mac_match) {
-                ESP_LOGI(GATTC_TAG, "   🎯 MATCH STATUS: %s%s", 
-                         name_match ? "NAME✅" : "NAME❌",
-                         use_mac_matching ? (mac_match ? " MAC✅" : " MAC❌") : " MAC⚪");
-            } else {
-                ESP_LOGD(GATTC_TAG, "   Match Status: No match");
-            }
-            
-            // 每扫描到10个设备显示一次统计
-            if (scan_count % 10 == 0) {
-                ESP_LOGI(GATTC_TAG, "📊 Scan Statistics: Total=%d, Named=%d, Unnamed=%d", 
-                         scan_count, named_device_count, scan_count - named_device_count);
-            }
-
 #if CONFIG_EXAMPLE_DUMP_ADV_DATA_AND_SCAN_RESP
             if (scan_result->scan_rst.adv_data_len > 0) {
                 ESP_LOGI(GATTC_TAG, "adv data:");
@@ -712,75 +657,6 @@ void app_main(void)
     }
     */
 
-}
-
-/**
- * @brief 从广播数据中获取设备名称
- * 
- * 此函数首先尝试获取完整设备名称，如果没有找到则尝试短设备名称。
- * 它会检查广播数据和扫描响应数据。
- * 
- * @param adv_data 广播数据缓冲区
- * @param adv_data_len 广播数据长度
- * @param scan_rsp_len 扫描响应数据长度
- * @param name_len 输出参数：找到的设备名称长度
- * @return 设备名称的指针，如果没有找到则返回NULL
- */
-static uint8_t* get_device_name_from_adv_data(uint8_t *adv_data, uint16_t adv_data_len, uint16_t scan_rsp_len, uint8_t *name_len)
-{
-    uint8_t *name = NULL;
-    uint16_t total_len = adv_data_len + scan_rsp_len;
-    
-    // 1. 首先尝试获取完整设备名称 (Complete Local Name)
-    name = esp_ble_resolve_adv_data_by_type(adv_data, total_len, ESP_BLE_AD_TYPE_NAME_CMPL, name_len);
-    if (name != NULL && *name_len > 0) {
-        ESP_LOGD(GATTC_TAG, "Found complete device name");
-        return name;
-    }
-    
-    // 2. 如果没有找到完整名称，尝试获取短设备名称 (Shortened Local Name)
-    name = esp_ble_resolve_adv_data_by_type(adv_data, total_len, ESP_BLE_AD_TYPE_NAME_SHORT, name_len);
-    if (name != NULL && *name_len > 0) {
-        ESP_LOGD(GATTC_TAG, "Found shortened device name");
-        return name;
-    }
-    
-    // 3. 如果仍然没有找到，分别检查广播数据和扫描响应数据
-    if (adv_data_len > 0) {
-        // 只在广播数据中查找完整名称
-        name = esp_ble_resolve_adv_data_by_type(adv_data, adv_data_len, ESP_BLE_AD_TYPE_NAME_CMPL, name_len);
-        if (name != NULL && *name_len > 0) {
-            ESP_LOGD(GATTC_TAG, "Found complete name in adv data only");
-            return name;
-        }
-        
-        // 只在广播数据中查找短名称
-        name = esp_ble_resolve_adv_data_by_type(adv_data, adv_data_len, ESP_BLE_AD_TYPE_NAME_SHORT, name_len);
-        if (name != NULL && *name_len > 0) {
-            ESP_LOGD(GATTC_TAG, "Found short name in adv data only");
-            return name;
-        }
-    }
-    
-    if (scan_rsp_len > 0) {
-        // 只在扫描响应数据中查找完整名称
-        name = esp_ble_resolve_adv_data_by_type(adv_data + adv_data_len, scan_rsp_len, ESP_BLE_AD_TYPE_NAME_CMPL, name_len);
-        if (name != NULL && *name_len > 0) {
-            ESP_LOGD(GATTC_TAG, "Found complete name in scan response only");
-            return name;
-        }
-        
-        // 只在扫描响应数据中查找短名称
-        name = esp_ble_resolve_adv_data_by_type(adv_data + adv_data_len, scan_rsp_len, ESP_BLE_AD_TYPE_NAME_SHORT, name_len);
-        if (name != NULL && *name_len > 0) {
-            ESP_LOGD(GATTC_TAG, "Found short name in scan response only");
-            return name;
-        }
-    }
-    
-    // 没有找到任何设备名称
-    *name_len = 0;
-    return NULL;
 }
 
 /**
@@ -1106,27 +982,6 @@ static void discover_all_characteristics_after_service_discovery(esp_gatt_if_t g
 }
 
 /**
- * @brief 将UUID字符串转换为字节数组（小端格式）
- * @param uuid_str UUID字符串，格式为 "12345678-1234-1234-1234-123456789ABC"
- * @param uuid_bytes 输出的16字节数组
- */
-static void uuid_string_to_bytes(const char* uuid_str, uint8_t* uuid_bytes)
-{
-    // 示例UUID: "12345678-1234-1234-1234-123456789ABC"
-    // 转换为小端字节序: {0xBC, 0x9A, 0x78, 0x56, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x34, 0x12, 0x78, 0x56, 0x34, 0x12}
-    
-    // 这里提供一个简单的示例实现
-    // 实际使用时，您需要根据具体的UUID字符串格式来解析
-    
-    // 示例：解析Nordic UART Service UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-    if (strstr(uuid_str, "6E400001") != NULL) {
-        uint8_t nordic_uart_service[] = {0x9E, 0xCA, 0xDC, 0x24, 0x0E, 0xE5, 0xA9, 0xE0, 0x93, 0xF3, 0xA3, 0xB5, 0x01, 0x00, 0x40, 0x6E};
-        memcpy(uuid_bytes, nordic_uart_service, 16);
-    }
-    // 可以继续添加更多UUID的解析...
-}
-
-/**
  * @brief 添加自定义128位UUID到扫描列表
  * 
  * 如果您知道目标设备的特定128位UUID，可以在这里添加：
@@ -1182,7 +1037,7 @@ static void IRAM_ATTR gpio_isr_handler(void* arg)
 }
 
 /**
- * @brief GPIO按键处理任务 - 安全版本
+ * @brief GPIO按键处理任务
  *
  * 等待中断事件并发送数据，添加了安全检查
  */
@@ -1218,13 +1073,6 @@ static void gpio_button_task(void* arg)
 
                 ESP_LOGI(GATTC_TAG, "Button pressed! Sending data...");
                     send_data_to_char_0013();
-
-                // // 安全发送数据
-                // if (gl_profile_tab[PROFILE_A_APP_ID].char_handle != 0) {
-                //     send_data_to_char_0013();
-                // } else {
-                //     ESP_LOGW(GATTC_TAG, "Characteristic not ready, skipping send");
-                // }
             } else {
                 ESP_LOGD(GATTC_TAG, "Button press ignored (debounce)");
             }
