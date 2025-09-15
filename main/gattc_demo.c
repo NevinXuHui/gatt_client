@@ -493,6 +493,33 @@ static void esp_gap_cb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *par
             } else {
                 ESP_LOGI(GATTC_TAG, "   Device Name: <Not Available>");
             }
+            
+            // 打印原始广播数据用于调试
+            ESP_LOGI(GATTC_TAG, "📡 Raw Data: ADV=%d bytes, ScanRsp=%d bytes", 
+                     scan_result->scan_rst.adv_data_len, scan_result->scan_rst.scan_rsp_len);
+            
+            // 打印原始广播数据
+            if (scan_result->scan_rst.adv_data_len > 0) {
+                ESP_LOGI(GATTC_TAG, "   ADV Data:");
+                ESP_LOG_BUFFER_HEX(GATTC_TAG, scan_result->scan_rst.ble_adv, scan_result->scan_rst.adv_data_len);
+            }
+            
+            // 打印扫描响应数据
+            if (scan_result->scan_rst.scan_rsp_len > 0) {
+                ESP_LOGI(GATTC_TAG, "   Scan Response:");
+                ESP_LOG_BUFFER_HEX(GATTC_TAG, scan_result->scan_rst.ble_adv + scan_result->scan_rst.adv_data_len, 
+                                   scan_result->scan_rst.scan_rsp_len);
+            }
+            
+            // 打印完整数据
+            uint16_t total_len = scan_result->scan_rst.adv_data_len + scan_result->scan_rst.scan_rsp_len;
+            if (total_len > 0) {
+                ESP_LOGI(GATTC_TAG, "   Complete Data (%d bytes):", total_len);
+                ESP_LOG_BUFFER_HEX(GATTC_TAG, scan_result->scan_rst.ble_adv, total_len);
+            } else {
+                ESP_LOGW(GATTC_TAG, "⚠️  No advertisement data received!");
+            }
+            
             // 使用新的设备匹配逻辑（优先设备名称，备用MAC地址）
             if (is_target_device(scan_result->scan_rst.bda, adv_name, adv_name_len)) {
                 ESP_LOGI(GATTC_TAG, "=== TARGET DEVICE FOUND ===");
